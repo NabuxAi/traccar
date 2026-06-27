@@ -12,6 +12,7 @@ import org.traccar.model.Position;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class OmniProtocolDecoderTest extends ProtocolTest {
@@ -24,6 +25,18 @@ public class OmniProtocolDecoderTest extends ProtocolTest {
         verifyPosition(decoder, text(
                 "*SCOR,OM,123456789012345,D0,0,120001.0,A,2457.8101,N,12125.5393,E,"
                         + "8,0.8,010124,10.0,M,A#"));
+
+    }
+
+    @Test
+    public void testDecodeInvalidPositionDropped() throws Exception {
+
+        var decoder = inject(new OmniProtocolDecoder(null));
+
+        // D0 with no GPS fix (status=V, empty coordinates) and no prior location must
+        // not produce a 0,0 (Null Island) position. See Omni protocol 1.3.12 note.
+        assertNull(decoder.decode(
+                null, null, "*SCOR,OM,123456789012345,D0,0,033724.00,V,,,,,,,120517,,,N#\n"));
 
     }
 

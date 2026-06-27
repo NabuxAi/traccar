@@ -270,11 +270,19 @@ public class OmniProtocolDecoder extends BaseProtocolDecoder {
         getLastLocation(position, null);
 
         String status = values[2];
-        position.setValid(status.equals("A"));
+        boolean valid = status.equals("A") && !values[3].isEmpty() && !values[5].isEmpty();
+        position.setValid(valid);
 
-        if (status.equals("A") && !values[3].isEmpty() && !values[5].isEmpty()) {
+        if (valid) {
             position.setLatitude(parseCoordinate(values[3], values[4]));
             position.setLongitude(parseCoordinate(values[5], values[6]));
+        } else if (position.getLatitude() == 0 && position.getLongitude() == 0) {
+            // No valid GPS fix (status=V / empty coordinates) and no previous known
+            // location: skip emitting a 0,0 (Null Island) position instead of plotting
+            // the device in the middle of the ocean. Telemetry still arrives via H0/S6.
+            LOGGER.info("Omni D0 dropped for device {}: no GPS fix (status={}) and no prior location",
+                    deviceSession.getDeviceId(), status);
+            return null;
         }
 
         LOGGER.info("Omni D0 position for device {}: status={} ({}), rawLat=[{}{}], rawLon=[{}{}], "

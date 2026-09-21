@@ -55,11 +55,13 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             Map.entry("02", "GL200"),
             Map.entry("04", "GV200"),
             Map.entry("06", "GV300"),
+            Map.entry("07", "GT500"),
             Map.entry("08", "GMT100"),
             Map.entry("09", "GV50P"),
             Map.entry("0F", "GV55"),
             Map.entry("10", "GV55 LITE"),
             Map.entry("11", "GL500"),
+            Map.entry("12", "ATPLUS"),
             Map.entry("1A", "GL300"),
             Map.entry("1F", "GV500"),
             Map.entry("21", "GL200"),
@@ -68,6 +70,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             Map.entry("28", "GL300VC"),
             Map.entry("2C", "GL300W"),
             Map.entry("2D", "GV500VC"),
+            Map.entry("2E", "GL53MG"),
             Map.entry("2F", "GV55"),
             Map.entry("4F", "GV56"),
             Map.entry("30", "GL300"),
@@ -317,10 +320,6 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         return position;
     }
 
-    private void skipLocation(Parser parser) {
-        parser.skip(20);
-    }
-
     private static final Pattern PATTERN_LOCATION = new PatternBuilder()
             .number("(d{1,2}.?d?)?,")            // hdop
             .number("(d{1,3}.d)?,")              // speed
@@ -437,18 +436,33 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             index += 4;
         }
 
+        if (model.equals("GT500")) {
+            if (!v[index].isEmpty()) {
+                String mac = v[index].replaceAll("(..)", "$1:");
+                network.addWifiAccessPoint(WifiAccessPoint.from(
+                        mac.substring(0, mac.length() - 1), Integer.parseInt(v[index + 1])));
+            }
+            index += 2; // mac and rssi
+        }
+
         if (network.getWifiAccessPoints() != null || network.getCellTowers() != null) {
             position.setNetwork(network);
         }
 
-        if (model.startsWith("GL5")) {
-            index += 1; // csq rssi
-            index += 1; // csq ber
+        if (model.matches("GL5.*|GT500MA|GT501|ATWG7|ATPLUS")) {
+            if (!v[index++].isEmpty() && !model.equals("ATPLUS")) {
+                position.set(Position.KEY_RSSI, Integer.parseInt(v[index - 1]));
+            }
+            if (model.startsWith("GL5")) {
+                index += 1; // csq ber
+            }
         }
 
-        if (model.equals("GT500MA") || model.equals("GT501") || model.equals("ATWG7")) {
-            index += 1; // csq rssi
-        } else if (!model.equals("GL320M") && !v[index++].isEmpty()) {
+        if (model.equals("GL53MG")) {
+            if (!v[index++].isEmpty()) {
+                position.set(Position.KEY_SATELLITES, Integer.parseInt(v[index - 1]));
+            }
+        } else if (!model.matches("GL320M|GT500MA|GT501|ATWG7|ATPLUS") && !v[index++].isEmpty()) {
             String value = v[index - 1];
             if (value.contains(".")) {
                 position.set(Position.KEY_ODOMETER, Double.parseDouble(value) * 1000);
@@ -850,155 +864,27 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         return position;
     }
 
-    private void decodeStatus(Position position, long value) {
-        long ignition = BitUtil.between(value, 2 * 8, 3 * 8);
+    private void decodeStatus(Position position, String status) {
+        long value = Long.parseLong(status, 16);
+        long ignition = status.length() == 2 ? value : BitUtil.between(value, 2 * 8, 3 * 8);
         if (BitUtil.check(ignition, 4)) {
             position.set(Position.KEY_IGNITION, false);
         } else if (BitUtil.check(ignition, 5)) {
             position.set(Position.KEY_IGNITION, true);
         }
-        long input = BitUtil.between(value, 8, 2 * 8);
-        long output = BitUtil.to(value, 8);
-        position.set(Position.KEY_INPUT, input);
-        position.set(Position.PREFIX_IN + 1, BitUtil.check(input, 1));
-        position.set(Position.PREFIX_IN + 2, BitUtil.check(input, 2));
-        position.set(Position.KEY_OUTPUT, output);
-        position.set(Position.PREFIX_OUT + 1, BitUtil.check(output, 0));
-        position.set(Position.PREFIX_OUT + 2, BitUtil.check(output, 1));
+        if (status.length() > 2) {
+            long input = BitUtil.between(value, 8, 2 * 8);
+            long output = BitUtil.to(value, 8);
+            position.set(Position.KEY_INPUT, input);
+            position.set(Position.PREFIX_IN + 1, BitUtil.check(input, 1));
+            position.set(Position.PREFIX_IN + 2, BitUtil.check(input, 2));
+            position.set(Position.KEY_OUTPUT, output);
+            position.set(Position.PREFIX_OUT + 1, BitUtil.check(output, 0));
+            position.set(Position.PREFIX_OUT + 2, BitUtil.check(output, 1));
+        }
     }
 
-    private static final Pattern PATTERN_FRI = new PatternBuilder()
-            .text("+").expression("(?:RESP|BUFF):GT...,")
-            .expression("(?:.{6}|.{10})?,")      // protocol version
-            .number("(d{15}|x{14}),")            // imei
-            .expression("(?:([0-9A-Z]{17}),)?")  // vin
-            .expression("[^,]*,")                // device name
-            .number("(d+)?,")                    // power
-            .number("(d{1,2}),").optional()      // report type
-            .number("d{1,2},").optional()        // count
-            .number("d*,").optional()            // reserved
-            .number("(d+),").optional()          // battery
-            .expression("((?:")
-            .expression(PATTERN_LOCATION.pattern())
-            .expression(")+)")
-            .groupBegin()
-            .number("d{1,2},")
-            .number("(d{1,5})?,")                // battery
-            .number("(d{1,3}),")                 // battery level
-            .number("[01],")                     // mode
-            .number("(?:[01])?,")                // motion
-            .number("(-?d{1,2}.d)?,")            // temperature
-            .or()
-            .number("(d{1,7}.d)?,")              // odometer
-            .number("(d{5}:dd:dd)?,")            // hour meter
-            .number("(x+)?,")                    // adc 1
-            .number("(x+)?,")                    // adc 2
-            .number("d*,").optional()            // reserved
-            .number("(d{1,3})?,")                // battery
-            .number("(x{6})?,")                  // device status
-            .number("(d+)?,")                    // rpm
-            .number("(?:d+.?d*|Inf|NaN)?,")      // fuel consumption
-            .number("(d+)?,")                    // fuel level
-            .or()
-            .number("(-?d),")                    // rssi
-            .number("(d{1,3}),")                 // battery
-            .or()
-            .number("(d{1,7}.d)?,").optional()   // odometer
-            .number("(d{1,3})?,")                // battery
-            .groupEnd()
-            .any()
-            .number("(dddd)(dd)(dd)")            // date (yyyymmdd)
-            .number("(dd)(dd)(dd)").optional(2)  // time (hhmmss)
-            .text(",")
-            .number("(xxxx)")                    // count number
-            .text("$").optional()
-            .compile();
-
-    private Object decodeFri(Channel channel, SocketAddress remoteAddress, String sentence) {
-        Parser parser = new Parser(PATTERN_FRI, sentence);
-        if (!parser.matches()) {
-            return null;
-        }
-
-        DeviceSession deviceSession = getDeviceSession(channel, remoteAddress, parser.next());
-        if (deviceSession == null) {
-            return null;
-        }
-
-        LinkedList<Position> positions = new LinkedList<>();
-
-        String vin = parser.next();
-        Integer power = parser.nextInt();
-        Integer reportType = parser.nextInt();
-        Integer battery = parser.nextInt();
-
-        Parser itemParser = new Parser(PATTERN_LOCATION, parser.next());
-        while (itemParser.find()) {
-            Position position = new Position(getProtocolName());
-            position.setDeviceId(deviceSession.getDeviceId());
-
-            position.set(Position.KEY_VIN, vin);
-
-            decodeLocation(position, itemParser);
-
-            positions.add(position);
-        }
-
-        Position position = positions.getLast();
-
-        skipLocation(parser);
-
-        if (power != null && power > 10) {
-            position.set(Position.KEY_POWER, power / 1000.0); // only on some devices
-        }
-        if (battery != null) {
-            position.set(Position.KEY_BATTERY_LEVEL, battery);
-        }
-
-        if (parser.hasNext()) {
-            position.set(Position.KEY_BATTERY, parser.nextInt() / 1000.0);
-        }
-        position.set(Position.KEY_BATTERY_LEVEL, parser.nextInt());
-        position.set(Position.PREFIX_TEMP + 1, parser.nextDouble());
-
-        if (parser.hasNext()) {
-            position.set(Position.KEY_ODOMETER, parser.nextDouble() * 1000);
-        }
-        position.set(Position.KEY_HOURS, parseHours(parser.next()));
-        position.set(Position.PREFIX_ADC + 1, parser.next());
-        position.set(Position.PREFIX_ADC + 2, parser.next());
-        position.set(Position.KEY_BATTERY_LEVEL, parser.nextInt());
-
-        if (parser.hasNext()) {
-            decodeStatus(position, parser.nextHexLong());
-        }
-
-        position.set(Position.KEY_RPM, parser.nextInt());
-        position.set(Position.KEY_FUEL, parser.nextInt());
-
-        if (parser.hasNext(2)) {
-            if (reportType != null) {
-                position.set(Position.KEY_MOTION, BitUtil.check(reportType, 0));
-                position.set(Position.KEY_CHARGE, BitUtil.check(reportType, 1));
-            }
-            position.set(Position.KEY_RSSI, parser.nextInt());
-            position.set(Position.KEY_BATTERY_LEVEL, parser.nextInt());
-        }
-        if (parser.hasNext()) {
-            position.set(Position.KEY_ODOMETER, parser.nextDouble() * 1000);
-        }
-        position.set(Position.KEY_BATTERY_LEVEL, parser.nextInt());
-
-        decodeDeviceTime(position, parser);
-        if (ignoreFixTime) {
-            positions.clear();
-            positions.add(position);
-        }
-
-        return positions;
-    }
-
-    private Object decodeEri(Channel channel, SocketAddress remoteAddress, String[] v) {
+    private Object decodeFri(Channel channel, SocketAddress remoteAddress, String[] v) {
         int index = 0;
         boolean extended = v[index++].endsWith("ERI");
         String protocolVersion = v[index++];
@@ -1044,23 +930,34 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             }
         }
 
-        if (!extended && model.matches("GL200|GL300(W|VC)?|GT501|ATWG7")) {
+        if (!extended && model.matches("GL200|GL300(W|VC)?|GT50[01]|ATWG7|ATPLUS")) {
             if (model.equals("ATWG7") && reportType != null) {
                 position.set(Position.KEY_MOTION, BitUtil.check(reportType, 0));
+                position.set(Position.KEY_CHARGE, BitUtil.check(reportType, 1));
             }
             if (model.equals("GT501") || model.equals("ATWG7")) {
                 index += 1; // location mode / network
             }
             if (!v[index++].isEmpty()) {
-                position.set(Position.KEY_BATTERY_LEVEL, Integer.parseInt(v[index - 1]));
+                String value = v[index - 1];
+                if (value.contains(".")) {
+                    position.set(Position.KEY_ODOMETER, Double.parseDouble(value) * 1000);
+                } else {
+                    position.set(Position.KEY_BATTERY_LEVEL, Integer.parseInt(value));
+                }
             }
             return positions;
         }
 
-        position.set(Position.KEY_POWER, power);
+        if (power != null && power > 0) {
+            position.set(Position.KEY_POWER, power);
+        }
 
         if (!model.startsWith("GL5")) {
             position.set(Position.KEY_ODOMETER, v[index++].isEmpty() ? null : Double.parseDouble(v[index - 1]) * 1000);
+        }
+        if (index == v.length - 2) {
+            return positions;
         }
         if (!model.startsWith("GL5") && !model.equals("GL320M")) {
             position.set(Position.KEY_HOURS, parseHours(v[index++]));
@@ -1086,7 +983,9 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             position.set(Position.KEY_BATTERY_LEVEL, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]));
             index += 1; // mode selection
             position.set(Position.KEY_MOTION, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]) > 0);
-            if (!extended && !v[index++].isEmpty()) {
+            if (!extended && model.equals("GL53MG")) {
+                index += 2; // radio access technology and band
+            } else if (!extended && !v[index++].isEmpty()) {
                 position.set(Position.PREFIX_TEMP + 1, Double.parseDouble(v[index - 1]));
             }
         } else if (model.equals("GV200")) {
@@ -1101,7 +1000,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         } else {
             position.set(Position.KEY_BATTERY_LEVEL, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]));
             if (!v[index++].isEmpty()) {
-                decodeStatus(position, Long.parseLong(v[index - 1], 16));
+                decodeStatus(position, v[index - 1]);
             }
             if (extended) {
                 index += 1; // reserved / uart device type
@@ -1862,8 +1761,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
                 case "INF" -> decodeInf(channel, remoteAddress, values);
                 case "OBD" -> decodeObd(channel, remoteAddress, sentence);
                 case "CAN" -> decodeCan(channel, remoteAddress, values);
-                case "FRI", "GEO", "RTL", "DOG" -> decodeFri(channel, remoteAddress, sentence);
-                case "ERI" -> decodeEri(channel, remoteAddress, values);
+                case "FRI", "ERI", "GEO", "RTL", "DOG" -> decodeFri(channel, remoteAddress, values);
                 case "IGN", "IGF", "VGN", "VGF" -> decodeIgn(channel, remoteAddress, values, type);
                 case "LSW", "TSW" -> decodeLsw(channel, remoteAddress, sentence);
                 case "IDA" -> decodeIda(channel, remoteAddress, sentence);

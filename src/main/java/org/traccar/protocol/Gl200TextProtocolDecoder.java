@@ -446,7 +446,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             index += 1; // csq ber
         }
 
-        if (model.equals("GT500MA") || model.equals("GT501")) {
+        if (model.equals("GT500MA") || model.equals("GT501") || model.equals("ATWG7")) {
             index += 1; // csq rssi
         } else if (!model.equals("GL320M") && !v[index++].isEmpty()) {
             String value = v[index - 1];
@@ -1008,11 +1008,16 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         }
 
         String model = getDeviceModel(deviceSession, protocolVersion);
-        String vin = model.equals("GV500") ? v[index++] : null;
+        String vin = model.startsWith("GV500") ? v[index++] : null;
         index += 1; // device name
         long mask = extended ? Long.parseLong(v[index++], 16) : 0;
         Double power = v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]) / 1000.0;
-        index += 1; // report type
+        Integer reportType = v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]);
+
+        if (model.equals("ATWG7")) {
+            index += 1; // motion state
+            index += 1; // wms working mode
+        }
 
         int count = Integer.parseInt(v[index++]);
         LinkedList<Position> positions = new LinkedList<>();
@@ -1020,6 +1025,9 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             Position position = new Position(getProtocolName());
             position.setDeviceId(deviceSession.getDeviceId());
             position.set(Position.KEY_VIN, vin);
+            if (model.equals("GT501")) {
+                position.set(Position.KEY_SATELLITES, Integer.parseInt(v[index++]));
+            }
             index = decodeLocation(position, model, v, index);
             positions.add(position);
         }
@@ -1036,7 +1044,13 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             }
         }
 
-        if (!extended && model.matches("GL200|GL300(W|VC)?")) {
+        if (!extended && model.matches("GL200|GL300(W|VC)?|GT501|ATWG7")) {
+            if (model.equals("ATWG7") && reportType != null) {
+                position.set(Position.KEY_MOTION, BitUtil.check(reportType, 0));
+            }
+            if (model.equals("GT501") || model.equals("ATWG7")) {
+                index += 1; // location mode / network
+            }
             if (!v[index++].isEmpty()) {
                 position.set(Position.KEY_BATTERY_LEVEL, Integer.parseInt(v[index - 1]));
             }
@@ -1053,17 +1067,18 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             if (!v[index++].isEmpty()) {
                 decodeAnalog(position, 1, v[index - 1]);
             }
-        }
-        if (model.startsWith("GV") && !model.startsWith("GV6") && !model.equals("GV350M")) {
-            if (!v[index++].isEmpty()) {
-                decodeAnalog(position, 2, v[index - 1]);
+            if (!extended || model.startsWith("GV") && !model.startsWith("GV6") && !model.equals("GV350M")) {
+                if (!v[index++].isEmpty()) {
+                    decodeAnalog(position, 2, v[index - 1]);
+                }
             }
         }
         if (model.equals("GV200") || model.equals("GV310LAU") || model.equals("GV350CEU")) {
             if (!v[index++].isEmpty()) {
                 decodeAnalog(position, 3, v[index - 1]);
             }
-        } else if (model.startsWith("GV3") && model.endsWith("CEU") || model.startsWith("GV600M")) {
+        } else if (model.startsWith("GV3") && model.endsWith("CEU")
+                || model.startsWith("GV600M") || model.equals("GV58LAU")) {
             index += 1; // reserved
         }
 
@@ -1071,6 +1086,9 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
             position.set(Position.KEY_BATTERY_LEVEL, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]));
             index += 1; // mode selection
             position.set(Position.KEY_MOTION, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1]) > 0);
+            if (!extended && !v[index++].isEmpty()) {
+                position.set(Position.PREFIX_TEMP + 1, Double.parseDouble(v[index - 1]));
+            }
         } else if (model.equals("GV200")) {
             position.set(Position.KEY_INPUT, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1], 16));
             position.set(Position.KEY_OUTPUT, v[index++].isEmpty() ? null : Integer.parseInt(v[index - 1], 16));
@@ -1726,7 +1744,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
 
         int index = 0;
         index += 1; // header
-        index += 1; // protocol version
+        String protocolVersion = v[index++];
 
         DeviceSession deviceSession = getDeviceSession(channel, remoteAddress, v[index++]);
         if (deviceSession == null) {
@@ -1738,6 +1756,12 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         if (v[index + 2].matches("\\p{XDigit}{1,2}")) {
             int reportType = Integer.parseInt(v[index + 2], 16);
             switch (type) {
+                case "STR", "CTN" -> {
+                    String battery = v[index + 5];
+                    if (getDeviceModel(deviceSession, protocolVersion).matches("GL5[03]0") && !battery.isEmpty()) {
+                        position.set(Position.KEY_BATTERY_LEVEL, Integer.parseInt(battery));
+                    }
+                }
                 case "NMR" -> position.set(Position.KEY_MOTION, reportType == 1);
                 case "DIS" -> position.set(Position.PREFIX_IN + reportType / 0x10, reportType % 0x10 == 1);
                 case "IGL" -> position.set(Position.KEY_IGNITION, reportType % 0x10 == 1);
@@ -1838,7 +1862,7 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
                 case "INF" -> decodeInf(channel, remoteAddress, values);
                 case "OBD" -> decodeObd(channel, remoteAddress, sentence);
                 case "CAN" -> decodeCan(channel, remoteAddress, values);
-                case "CTN", "FRI", "GEO", "RTL", "DOG", "STR" -> decodeFri(channel, remoteAddress, sentence);
+                case "FRI", "GEO", "RTL", "DOG" -> decodeFri(channel, remoteAddress, sentence);
                 case "ERI" -> decodeEri(channel, remoteAddress, values);
                 case "IGN", "IGF", "VGN", "VGF" -> decodeIgn(channel, remoteAddress, values, type);
                 case "LSW", "TSW" -> decodeLsw(channel, remoteAddress, sentence);

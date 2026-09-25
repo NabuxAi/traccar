@@ -1654,18 +1654,23 @@ public class Gl200TextProtocolDecoder extends BaseProtocolDecoder {
         Position position = new Position(getProtocolName());
         position.setDeviceId(deviceSession.getDeviceId());
 
+        String model = getDeviceModel(deviceSession, protocolVersion);
+
         if (v[index + 2].matches("\\p{XDigit}{1,2}")) {
             int reportType = Integer.parseInt(v[index + 2], 16);
             switch (type) {
                 case "STR", "CTN" -> {
                     String battery = v[index + 5];
-                    if (getDeviceModel(deviceSession, protocolVersion).matches("GL5[03]0") && !battery.isEmpty()) {
+                    if (model.matches("GL5[03]0") && !battery.isEmpty()) {
                         position.set(Position.KEY_BATTERY_LEVEL, Integer.parseInt(battery));
                     }
                 }
                 case "NMR" -> position.set(Position.KEY_MOTION, reportType == 1);
                 case "DIS" -> position.set(Position.PREFIX_IN + reportType / 0x10, reportType % 0x10 == 1);
-                case "IGL" -> position.set(Position.KEY_IGNITION, reportType % 0x10 == 1);
+                case "IGL" -> {
+                    int ignitionOnValue = model.matches("GV50M.*|GV300N?|GV350M|GV600MG|GV350CEU|GV355CEU") ? 0 : 1;
+                    position.set(Position.KEY_IGNITION, reportType % 0x10 == ignitionOnValue);
+                }
                 case "HBM" -> {
                     switch (reportType % 0x10) {
                         case 0, 3 -> position.addAlarm(Position.ALARM_BRAKING);

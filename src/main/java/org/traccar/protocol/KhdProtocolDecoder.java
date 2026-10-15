@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 - 2021 Anton Tananaev (anton@traccar.org)
+ * Copyright 2014 - 2026 Anton Tananaev (anton@traccar.org)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.socket.DatagramChannel;
 import org.traccar.BaseProtocolDecoder;
 import org.traccar.NetworkMessage;
 import org.traccar.Protocol;
@@ -26,16 +27,24 @@ import org.traccar.helper.BcdUtil;
 import org.traccar.helper.BitUtil;
 import org.traccar.helper.BufferUtil;
 import org.traccar.helper.Checksum;
+import org.traccar.helper.DataConverter;
 import org.traccar.helper.DateBuilder;
 import org.traccar.helper.UnitsConverter;
 import org.traccar.model.CellTower;
 import org.traccar.model.Network;
 import org.traccar.model.Position;
+import org.traccar.model.WifiAccessPoint;
 import org.traccar.session.DeviceSession;
 
 import java.net.SocketAddress;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 
 public class KhdProtocolDecoder extends BaseProtocolDecoder {
+
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter
+            .ofPattern("yyMMddHHmmss").withZone(ZoneOffset.UTC);
 
     public KhdProtocolDecoder(Protocol protocol) {
         super(protocol);
@@ -66,6 +75,34 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
     public static final int MSG_REPLY = 0x85;
     public static final int MSG_SMS_ALARM_SWITCH = 0x86;
     public static final int MSG_PERIPHERAL = 0xA3;
+    public static final int MSG_TIME_APPLY = 0xD6;
+    public static final int MSG_TIME_RESPONSE = 0xD7;
+    public static final int MSG_PARAM_APPLY = 0xD8;
+
+    private void sendResponse(Channel channel, SocketAddress remoteAddress, ByteBuf buf, int type) {
+        ByteBuf response = Unpooled.buffer();
+        response.writeByte(0x29);
+        response.writeByte(0x29); // header
+        if (type == MSG_TIME_APPLY) {
+            response.writeByte(MSG_TIME_RESPONSE);
+            response.writeShort(13); // size
+            response.writeBytes(buf, buf.readerIndex(), 4); // device address
+            response.writeBytes(DataConverter.parseHex(DATE_FORMAT.format(Instant.now())));
+            response.writeByte(0); // reserved
+        } else {
+            response.writeByte(MSG_CONFIRMATION);
+            response.writeShort(5); // size
+            response.writeByte(buf.getByte(buf.writerIndex() - 2));
+            response.writeByte(type);
+            response.writeByte(buf.writerIndex() > 9 ? buf.getByte(9) : 0); // 10th byte
+        }
+        response.writeByte(Checksum.xor(response.nioBuffer()));
+        response.writeByte(0x0D); // ending
+
+        if (channel != null) {
+            channel.writeAndFlush(new NetworkMessage(response, remoteAddress));
+        }
+    }
 
     private void decodeAlarmStatus(Position position, byte[] status) {
         if (BitUtil.check(status[0], 4)) {
@@ -105,6 +142,51 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
         }
     }
 
+    private void decodeExtendedData(Position position, ByteBuf buf) {
+        int endIndex = buf.writerIndex() - 2; // checksum and ending
+        Network network = new Network();
+        while (buf.readerIndex() < endIndex) {
+            int length = buf.readUnsignedShort();
+            int type = buf.readUnsignedShort();
+            int dataEnd = buf.readerIndex() + length - 2;
+            switch (type) {
+                case 0x0024 -> {
+                    String[] values = BufferUtil.readString(buf, length - 2).split(";");
+                    network.addCellTower(CellTower.from(
+                            Integer.parseInt(values[0]), Integer.parseInt(values[1]),
+                            Integer.parseInt(values[2]), Long.parseLong(values[3])));
+                }
+                case 0x0088 -> position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
+                case 0x00A3 -> position.set("debug", BufferUtil.readString(buf, length - 2).trim());
+                case 0x00A5 -> position.set("model", String.format("%08X", buf.readUnsignedInt()));
+                case 0x00A9 -> {
+                    int mcc = buf.readUnsignedShort();
+                    int mnc = buf.readUnsignedByte();
+                    int count = buf.readUnsignedByte();
+                    for (int i = 0; i < count; i++) {
+                        network.addCellTower(CellTower.from(
+                                mcc, mnc, buf.readUnsignedShort(),
+                                buf.readUnsignedShort(), buf.readUnsignedByte()));
+                    }
+                }
+                case 0x00B9 -> {
+                    int count = buf.readUnsignedByte();
+                    String[] values = BufferUtil.readString(buf, length - 3).split(",");
+                    for (int i = 0; i < count; i++) {
+                        network.addWifiAccessPoint(WifiAccessPoint.from(
+                                values[i * 2].trim(), Integer.parseInt(values[i * 2 + 1].trim())));
+                    }
+                }
+                default -> {
+                }
+            }
+            buf.readerIndex(dataEnd);
+        }
+        if (network.getCellTowers() != null || network.getWifiAccessPoints() != null) {
+            position.setNetwork(network);
+        }
+    }
+
     @Override
     protected Object decode(
             Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
@@ -116,27 +198,18 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
         buf.readUnsignedShort(); // size
 
         if (type == MSG_LOGIN || type == MSG_ADMIN_NUMBER || type == MSG_SEND_TEXT
-                || type == MSG_SMS_ALARM_SWITCH || type == MSG_POSITION_REUPLOAD) {
+                || type == MSG_SMS_ALARM_SWITCH || type == MSG_POSITION_REUPLOAD || type == MSG_TIME_APPLY
+                || channel instanceof DatagramChannel && (type == MSG_POSITION_UPLOAD || type == MSG_REPLY)) {
+            sendResponse(channel, remoteAddress, buf, type);
+        }
 
-            ByteBuf response = Unpooled.buffer();
-            response.writeByte(0x29);
-            response.writeByte(0x29); // header
-            response.writeByte(MSG_CONFIRMATION);
-            response.writeShort(5); // size
-            response.writeByte(buf.getByte(buf.writerIndex() - 2));
-            response.writeByte(type);
-            response.writeByte(buf.writerIndex() > 9 ? buf.getByte(9) : 0); // 10th byte
-            response.writeByte(Checksum.xor(response.nioBuffer()));
-            response.writeByte(0x0D); // ending
-
-            if (channel != null) {
-                channel.writeAndFlush(new NetworkMessage(response, remoteAddress));
-            }
-
+        if (type == MSG_PARAM_APPLY) {
+            getDeviceSession(channel, remoteAddress, readIdentifiers(buf));
+            return null;
         }
 
         if (type == MSG_ON_DEMAND || type == MSG_POSITION_UPLOAD || type == MSG_POSITION_REUPLOAD
-                || type == MSG_ALARM || type == MSG_REPLY || type == MSG_PERIPHERAL) {
+                || type == MSG_ALARM || type == MSG_REPLY || type == MSG_PERIPHERAL || type == MSG_TIME_APPLY) {
 
             Position position = new Position(getProtocolName());
 
@@ -244,6 +317,10 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
 
                 decodeAlarmStatus(position, alarmStatus);
 
+            }
+
+            if (type == MSG_POSITION_UPLOAD || type == MSG_REPLY || type == MSG_TIME_APPLY) {
+                decodeExtendedData(position, buf);
             }
 
             return position;

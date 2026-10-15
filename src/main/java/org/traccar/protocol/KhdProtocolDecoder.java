@@ -157,8 +157,14 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
                             Integer.parseInt(values[2]), Long.parseLong(values[3])));
                 }
                 case 0x0088 -> position.set(Position.KEY_ODOMETER, buf.readUnsignedInt());
+                case 0x0089 -> {
+                    if (!BitUtil.check(buf.readUnsignedInt(), 12)) {
+                        position.addAlarm(Position.ALARM_TAMPERING);
+                    }
+                }
                 case 0x00A3 -> position.set("debug", BufferUtil.readString(buf, length - 2).trim());
                 case 0x00A5 -> position.set("model", String.format("%08X", buf.readUnsignedInt()));
+                case 0x00A8 -> position.set(Position.KEY_BATTERY_LEVEL, buf.readUnsignedByte());
                 case 0x00A9 -> {
                     int mcc = buf.readUnsignedShort();
                     int mnc = buf.readUnsignedByte();
@@ -167,6 +173,28 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
                         network.addCellTower(CellTower.from(
                                 mcc, mnc, buf.readUnsignedShort(),
                                 buf.readUnsignedShort(), buf.readUnsignedByte()));
+                    }
+                }
+                case 0x00AA -> {
+                    position.set(Position.KEY_IGNITION, buf.readUnsignedByte() == 1);
+                    position.set(Position.KEY_G_SENSOR, buf.readUnsignedByte() == 1);
+                    buf.skipBytes(12); // reporting intervals and mode durations
+                    String[] values = BufferUtil.readString(buf, length - 16).split(";");
+                    int mcc = Integer.parseInt(values[0]);
+                    int mnc = Integer.parseInt(values[1]);
+                    int count = Integer.parseInt(values[2]);
+                    for (int i = 0; i < count; i++) {
+                        network.addCellTower(CellTower.from(
+                                mcc, mnc, Integer.parseInt(values[3 + i * 2]),
+                                Long.parseLong(values[4 + i * 2])));
+                    }
+                }
+                case 0x00B3 -> {
+                    boolean bluetooth = buf.readUnsignedByte() == 0;
+                    int alarm = buf.readUnsignedShort();
+                    buf.readUnsignedShort(); // status
+                    if (bluetooth && !BitUtil.check(alarm, 1)) {
+                        position.addAlarm(Position.ALARM_TAMPERING);
                     }
                 }
                 case 0x00B9 -> {
@@ -254,7 +282,10 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
                 buf.readUnsignedByte();
                 buf.readUnsignedByte();
 
-                position.set(Position.KEY_RESULT, String.valueOf(buf.readUnsignedByte()));
+                int command = buf.readUnsignedByte();
+                if (command != 0 && command != MSG_CONFIRMATION) {
+                    position.set(Position.KEY_RESULT, String.valueOf(command));
+                }
 
                 if (type == MSG_PERIPHERAL) {
 

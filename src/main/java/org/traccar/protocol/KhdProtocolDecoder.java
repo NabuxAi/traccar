@@ -50,16 +50,20 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
         super(protocol);
     }
 
-    private String[] readIdentifiers(ByteBuf buf) {
-        String[] identifiers = new String[2];
+    String[] readIdentifiers(ByteBuf buf) {
+        String[] identifiers = new String[3];
 
         identifiers[0] = ByteBufUtil.hexDump(buf, buf.readerIndex(), 4);
 
         int b1 = buf.readUnsignedByte();
-        int b2 = buf.readUnsignedByte() - 0x80;
-        int b3 = buf.readUnsignedByte() - 0x80;
+        int b2 = buf.readUnsignedByte();
+        int b3 = buf.readUnsignedByte();
         int b4 = buf.readUnsignedByte();
-        identifiers[1] = String.format("%02d%02d%02d%02d", b1, b2, b3, b4);
+        identifiers[1] = String.format("%02d%02d%02d%02d", b1, b2 - 0x80, b3 - 0x80, b4);
+
+        int mask = ((b1 & 0x80) >> 4) | ((b2 & 0x80) >> 5) | ((b3 & 0x80) >> 6) | (b4 >> 7);
+        int prefix = 130 + mask + (mask >= 10 && mask <= 13 ? 16 : 0);
+        identifiers[2] = String.format("%03d%02d%02d%02d%02d", prefix, b1 & 0x7F, b2 & 0x7F, b3 & 0x7F, b4 & 0x7F);
 
         return identifiers;
     }
@@ -151,6 +155,7 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
             int dataEnd = buf.readerIndex() + length - 2;
             switch (type) {
                 case 0x0004 -> position.set(Position.PREFIX_ADC + 1, BcdUtil.readInteger(buf, 6) / 100000.0);
+                case 0x0008 -> position.set(Position.KEY_BATTERY_LEVEL, buf.readUnsignedShort() * 100 / 1500);
                 case 0x0024 -> {
                     String[] values = BufferUtil.readString(buf, length - 2).split(";");
                     network.addCellTower(CellTower.from(
@@ -228,7 +233,8 @@ public class KhdProtocolDecoder extends BaseProtocolDecoder {
 
         if (type == MSG_LOGIN || type == MSG_ADMIN_NUMBER || type == MSG_SEND_TEXT
                 || type == MSG_SMS_ALARM_SWITCH || type == MSG_POSITION_REUPLOAD || type == MSG_TIME_APPLY
-                || channel instanceof DatagramChannel && (type == MSG_POSITION_UPLOAD || type == MSG_REPLY)) {
+                || channel instanceof DatagramChannel && (type == MSG_ON_DEMAND || type == MSG_POSITION_UPLOAD
+                || type == MSG_ALARM || type == MSG_REPLY || type == MSG_PERIPHERAL)) {
             sendResponse(channel, remoteAddress, buf, type);
         }
 

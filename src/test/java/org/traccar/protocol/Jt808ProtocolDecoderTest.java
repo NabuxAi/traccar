@@ -447,6 +447,10 @@ public class Jt808ProtocolDecoderTest extends ProtocolTest {
         decoder.setModelOverride("JC371");
 
         verifyDecode(decoder, binary(
+                "7e090000134eb6fb4ad628df70f073746172742075706c6f6164207461736b3ba77e"),
+                position(Checks.ATTRIBUTES).attribute(Position.KEY_RESULT, "start upload task;"));
+
+        verifyDecode(decoder, binary(
                 "7E020000344EB6FB4AD6280001000000000000000301587D0106CBFF6600000000000026010112000001040000007B30011831010AE80A2003070105019F030190657E"),
                 position().attribute(Position.KEY_BATTERY, 4.15));
 

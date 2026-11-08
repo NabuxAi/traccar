@@ -66,6 +66,7 @@ public class Gt06ProtocolDecoder extends BaseProtocolDecoder {
     public static final int MSG_GPS_LBS_STATUS_1 = 0x16;
     public static final int MSG_WIFI = 0x17;
     public static final int MSG_GPS_LBS_RFID = 0x17;
+    public static final int MSG_LBS_ADDRESS_REQUEST = 0x17;
     public static final int MSG_GPS_LBS_STATUS_2 = 0x26;
     public static final int MSG_GPS_LBS_STATUS_3 = 0x27;
     public static final int MSG_LBS_MULTIPLE_1 = 0x28;
@@ -564,7 +565,9 @@ public class Gt06ProtocolDecoder extends BaseProtocolDecoder {
 
             return position;
 
-        } else if (type == MSG_ADDRESS_REQUEST) {
+        } else if (type == MSG_ADDRESS_REQUEST || (type == MSG_LBS_ADDRESS_REQUEST
+                && length == buf.readableBytes() - 1
+                && length == (BitUtil.check(buf.getUnsignedShort(buf.readerIndex()), 15) ? 0x25 : 0x24))) {
 
             String response = "NA&&NA&&0##";
             ByteBuf content = Unpooled.buffer();
@@ -739,6 +742,7 @@ public class Gt06ProtocolDecoder extends BaseProtocolDecoder {
             boolean cell4g = type == MSG_WIFI_ALARM && buf.readUnsignedByte() > 0;
 
             int cellCount = variant == Variant.WANWAY_S20 || type == MSG_WIFI_ALARM
+                    || (variant == Variant.SL4X && type == MSG_LBS_3)
                     ? buf.readUnsignedByte() : type == MSG_WIFI_5 ? 6 : 7;
             for (int i = 0; i < cellCount; i++) {
                 int lac;

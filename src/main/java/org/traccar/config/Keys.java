@@ -691,6 +691,15 @@ public final class Keys {
             100);
 
     /**
+     * Delay processing updates to device status and latest position by this many milliseconds, merging updates
+     * per device. Zero disables buffering. Pending device state can be lost on a crash.
+     */
+    public static final ConfigKey<Long> DATABASE_DEVICE_UPDATE_INTERVAL = new LongConfigKey(
+            "database.deviceUpdateInterval",
+            List.of(KeyType.CONFIG),
+            0L);
+
+    /**
      * Device limit for self registered users. Default value is -1, which indicates no limit.
      */
     public static final ConfigKey<Integer> USERS_DEFAULT_DEVICE_LIMIT = new IntegerConfigKey(
@@ -1933,6 +1942,22 @@ public final class Keys {
     public static final ConfigKey<Boolean> PROCESSING_COMPUTED_ATTRIBUTES_LAST_ATTRIBUTES = new BooleanConfigKey(
             "processing.computedAttributes.lastAttributes",
             List.of(KeyType.CONFIG));
+
+    /**
+     * Maximum number of parsed computed attribute expressions to cache. Zero disables caching.
+     */
+    public static final ConfigKey<Integer> PROCESSING_COMPUTED_ATTRIBUTES_CACHE_SIZE = new IntegerConfigKey(
+            "processing.computedAttributes.cacheSize",
+            List.of(KeyType.CONFIG),
+            128);
+
+    /**
+     * Cache computed attribute expressions shorter than this number of characters.
+     */
+    public static final ConfigKey<Integer> PROCESSING_COMPUTED_ATTRIBUTES_CACHE_THRESHOLD = new IntegerConfigKey(
+            "processing.computedAttributes.cacheThreshold",
+            List.of(KeyType.CONFIG),
+            1024);
 
     /**
      * Enable local variables declaration.

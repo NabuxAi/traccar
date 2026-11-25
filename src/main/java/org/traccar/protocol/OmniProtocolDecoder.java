@@ -44,7 +44,10 @@ public class OmniProtocolDecoder extends BaseProtocolDecoder {
 
     @Override
     protected void init() {
-        trackingInterval = (int) getConfig().getLong(Keys.PROTOCOL_INTERVAL.withPrefix(getProtocolName()));
+        trackingInterval = getConfig().getInteger(Keys.PROTOCOL_TRACKING_INTERVAL.withPrefix(getProtocolName()));
+        if (trackingInterval <= 0) {
+            trackingInterval = (int) getConfig().getLong(Keys.PROTOCOL_INTERVAL.withPrefix(getProtocolName()));
+        }
     }
 
     static ByteBuf encodeFrame(String content) {

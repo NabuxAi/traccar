@@ -15,11 +15,11 @@
  */
 package org.traccar.api.resource;
 
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.ws.rs.core.Context;
 import org.traccar.api.BaseObjectResource;
+import org.traccar.database.DeviceUpdateManager;
 import org.traccar.database.MediaManager;
 import org.traccar.helper.LogAction;
+import org.traccar.helper.model.PositionUtil;
 import org.traccar.model.Device;
 import org.traccar.model.DeviceAccumulators;
 import org.traccar.model.LinkedDevice;
@@ -34,6 +34,7 @@ import org.traccar.storage.query.Order;
 import org.traccar.storage.query.Request;
 
 import jakarta.inject.Inject;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
@@ -43,14 +44,17 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 @Path("devices")
@@ -66,6 +70,9 @@ public class DeviceResource extends BaseObjectResource<Device> {
 
     @Inject
     private ConnectionManager connectionManager;
+
+    @Inject
+    private DeviceUpdateManager deviceUpdateManager;
 
     @Inject
     private MediaManager mediaManager;
@@ -151,8 +158,7 @@ public class DeviceResource extends BaseObjectResource<Device> {
         permissionsService.checkPermission(Device.class, getUserId(), entity.getDeviceId());
         permissionsService.checkEdit(getUserId(), Device.class, false, false);
 
-        Position position = storage.getObject(Position.class, new Request(
-                new Columns.All(), new Condition.LatestPositions(entity.getDeviceId())));
+        Position position = PositionUtil.getLatestPosition(storage, entity.getDeviceId());
         if (position != null) {
             if (entity.getTotalDistance() != null) {
                 position.getAttributes().put(Position.KEY_TOTAL_DISTANCE, entity.getTotalDistance());
@@ -160,23 +166,16 @@ public class DeviceResource extends BaseObjectResource<Device> {
             if (entity.getHours() != null) {
                 position.getAttributes().put(Position.KEY_HOURS, entity.getHours());
             }
+            position.setServerTime(new Date());
             position.setId(storage.addObject(position, new Request(new Columns.Exclude("id"))));
 
-            Device device = new Device();
-            device.setId(position.getDeviceId());
-            device.setPositionId(position.getId());
-            storage.updateObject(device, new Request(
-                    new Columns.Include("positionId"),
-                    new Condition.Equals("id", device.getId())));
+            deviceUpdateManager.update(position.getDeviceId(), Map.of("positionId", position.getId()));
 
-            var key = new Object();
-            try {
-                cacheManager.addDevice(position.getDeviceId(), key);
+            cacheManager.withDevice(position.getDeviceId(), () -> {
                 cacheManager.updatePosition(position);
                 connectionManager.updatePosition(true, position);
-            } finally {
-                cacheManager.removeDevice(position.getDeviceId(), key);
-            }
+                return null;
+            });
         } else {
             throw new IllegalArgumentException();
         }
@@ -195,11 +194,11 @@ public class DeviceResource extends BaseObjectResource<Device> {
         };
     }
 
-    @Path("{id}/image")
+    @Path("{id}/{type:image|icon}")
     @POST
     @Consumes("image/*")
     public Response uploadImage(
-            @PathParam("id") long deviceId, File file,
+            @PathParam("id") long deviceId, @PathParam("type") String imageType, File file,
             @HeaderParam(HttpHeaders.CONTENT_TYPE) String type) throws StorageException, IOException {
 
         permissionsService.checkEdit(getUserId(), Device.class, false, false);
@@ -210,7 +209,7 @@ public class DeviceResource extends BaseObjectResource<Device> {
                         new Condition.Equals("id", deviceId),
                         new Condition.Permission(User.class, getUserId(), Device.class))));
         if (device != null) {
-            String name = "device";
+            String name = imageType.equals("image") ? "device" : imageType;
             String extension = imageExtension(type);
             try (var input = new FileInputStream(file);
                     var output = mediaManager.createFileStream(device.getUniqueId(), name, extension)) {

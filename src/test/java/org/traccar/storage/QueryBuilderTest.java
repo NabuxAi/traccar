@@ -6,12 +6,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.traccar.config.Config;
 
-import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.util.Date;
 import java.util.List;
 import java.util.stream.Stream;
+import javax.sql.DataSource;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,22 +33,69 @@ public class QueryBuilderTest {
         private Date fixTime;
         private byte[] data;
 
-        public long getId() { return id; }
-        public void setId(long id) { this.id = id; }
-        public boolean getActive() { return active; }
-        public void setActive(boolean active) { this.active = active; }
-        public int getCount() { return count; }
-        public void setCount(int count) { this.count = count; }
-        public long getDeviceId() { return deviceId; }
-        public void setDeviceId(long deviceId) { this.deviceId = deviceId; }
-        public double getSpeed() { return speed; }
-        public void setSpeed(double speed) { this.speed = speed; }
-        public String getName() { return name; }
-        public void setName(String name) { this.name = name; }
-        public Date getFixTime() { return fixTime; }
-        public void setFixTime(Date fixTime) { this.fixTime = fixTime; }
-        public byte[] getData() { return data; }
-        public void setData(byte[] data) { this.data = data; }
+        public long getId() {
+            return id;
+        }
+
+        public void setId(long id) {
+            this.id = id;
+        }
+
+        public boolean getActive() {
+            return active;
+        }
+
+        public void setActive(boolean active) {
+            this.active = active;
+        }
+
+        public int getCount() {
+            return count;
+        }
+
+        public void setCount(int count) {
+            this.count = count;
+        }
+
+        public long getDeviceId() {
+            return deviceId;
+        }
+
+        public void setDeviceId(long deviceId) {
+            this.deviceId = deviceId;
+        }
+
+        public double getSpeed() {
+            return speed;
+        }
+
+        public void setSpeed(double speed) {
+            this.speed = speed;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public Date getFixTime() {
+            return fixTime;
+        }
+
+        public void setFixTime(Date fixTime) {
+            this.fixTime = fixTime;
+        }
+
+        public byte[] getData() {
+            return data;
+        }
+
+        public void setData(byte[] data) {
+            this.data = data;
+        }
     }
 
     @BeforeEach
@@ -60,7 +107,7 @@ public class QueryBuilderTest {
         objectMapper = new ObjectMapper();
 
         try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+                Statement statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS test_entity");
             statement.execute(
                     "CREATE TABLE test_entity ("
@@ -80,7 +127,8 @@ public class QueryBuilderTest {
         Date now = new Date(1700000000000L);
         byte[] payload = {1, 2, 3, 4, 5};
 
-        try (QueryBuilder insert = QueryBuilder.create(config, dataSource, objectMapper,
+        try (QueryBuilder insert = QueryBuilder.create(
+                config, dataSource, objectMapper, null,
                 "INSERT INTO test_entity(active, count, deviceId, speed, name, fixTime, data) "
                         + "VALUES (?, ?, ?, ?, ?, ?, ?)", true)) {
             insert.setBoolean(0, true);
@@ -94,9 +142,9 @@ public class QueryBuilderTest {
             assertTrue(id > 0);
         }
 
-        try (QueryBuilder query = QueryBuilder.create(config, dataSource, objectMapper,
-                "SELECT * FROM test_entity");
-             Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class)) {
+        try (QueryBuilder query = QueryBuilder.create(
+                config, dataSource, objectMapper, null, "SELECT * FROM test_entity", false);
+                Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class, "H2")) {
             List<TestEntity> results = stream.toList();
             assertEquals(1, results.size());
             TestEntity entity = results.get(0);
@@ -123,16 +171,17 @@ public class QueryBuilderTest {
         entity.setData(new byte[] {9, 8, 7});
 
         List<String> columns = List.of("active", "count", "deviceId", "speed", "name", "fixTime", "data");
-        try (QueryBuilder insert = QueryBuilder.create(config, dataSource, objectMapper,
+        try (QueryBuilder insert = QueryBuilder.create(
+                config, dataSource, objectMapper, null,
                 "INSERT INTO test_entity(active, count, deviceId, speed, name, fixTime, data) "
                         + "VALUES (?, ?, ?, ?, ?, ?, ?)", true)) {
             insert.setObject(entity, columns);
             insert.executeUpdate();
         }
 
-        try (QueryBuilder query = QueryBuilder.create(config, dataSource, objectMapper,
-                "SELECT * FROM test_entity");
-             Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class)) {
+        try (QueryBuilder query = QueryBuilder.create(
+                config, dataSource, objectMapper, null, "SELECT * FROM test_entity", false);
+                Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class, "H2")) {
             List<TestEntity> results = stream.toList();
             assertEquals(1, results.size());
             TestEntity loaded = results.get(0);
@@ -148,8 +197,8 @@ public class QueryBuilderTest {
 
     @Test
     public void executeBatchInsertsMultipleRows() throws Exception {
-        try (QueryBuilder insert = QueryBuilder.create(config, dataSource, objectMapper,
-                "INSERT INTO test_entity(name, count) VALUES (?, ?)", true)) {
+        try (QueryBuilder insert = QueryBuilder.create(
+                config, dataSource, objectMapper, null, "INSERT INTO test_entity(name, count) VALUES (?, ?)", true)) {
             for (int i = 0; i < 3; i++) {
                 insert.setString(0, "row" + i);
                 insert.setInteger(1, i);
@@ -159,9 +208,9 @@ public class QueryBuilderTest {
             assertEquals(3, ids.size());
         }
 
-        try (QueryBuilder query = QueryBuilder.create(config, dataSource, objectMapper,
-                "SELECT * FROM test_entity ORDER BY count");
-             Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class)) {
+        try (QueryBuilder query = QueryBuilder.create(
+                config, dataSource, objectMapper, null, "SELECT * FROM test_entity ORDER BY count", false);
+                Stream<TestEntity> stream = query.executeQueryStreamed(TestEntity.class, "H2")) {
             List<TestEntity> results = stream.toList();
             assertEquals(3, results.size());
             assertEquals("row0", results.get(0).getName());

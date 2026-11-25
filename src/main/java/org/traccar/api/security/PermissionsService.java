@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 - 2023 Anton Tananaev (anton@traccar.org)
+ * Copyright 2022 - 2026 Anton Tananaev (anton@traccar.org)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import org.traccar.model.GroupedModel;
 import org.traccar.model.LinkedDevice;
 import org.traccar.model.ManagedUser;
 import org.traccar.model.Notification;
+import org.traccar.model.Permission;
 import org.traccar.model.Schedulable;
 import org.traccar.model.Server;
 import org.traccar.model.User;
@@ -36,6 +37,7 @@ import org.traccar.storage.query.Condition;
 import org.traccar.storage.query.Request;
 
 import jakarta.inject.Inject;
+import java.util.List;
 import java.util.Objects;
 
 @RequestScoped
@@ -171,7 +173,8 @@ public class PermissionsService {
     public void checkUser(long userId, long managedUserId) throws StorageException, SecurityException {
         if (userId != managedUserId && !getUser(userId).getAdministrator()) {
             if (!getUser(userId).getManager()
-                    || storage.getPermissions(User.class, userId, ManagedUser.class, managedUserId).isEmpty()) {
+                    || storage.getPermissions(List.of(new Permission(
+                            User.class, userId, ManagedUser.class, managedUserId))).isEmpty()) {
                 throw new SecurityException("User access denied");
             }
         }
@@ -180,7 +183,8 @@ public class PermissionsService {
     public void checkUserUpdate(long userId, User before, User after) throws StorageException, SecurityException {
         if (before.getAdministrator() != after.getAdministrator()
                 || before.getDeviceLimit() != after.getDeviceLimit()
-                || before.getUserLimit() != after.getUserLimit()) {
+                || before.getUserLimit() != after.getUserLimit()
+                || !Objects.equals(before.getLogin(), after.getLogin())) {
             checkAdmin(userId);
         }
         User user = userId > 0 ? getUser(userId) : null;

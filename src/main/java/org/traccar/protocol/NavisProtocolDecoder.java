@@ -1,5 +1,5 @@
 /*
- * Copyright 2012 - 2022 Anton Tananaev (anton@traccar.org)
+ * Copyright 2012 - 2026 Anton Tananaev (anton@traccar.org)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.session.DeviceSession;
 import org.traccar.NetworkMessage;
 import org.traccar.Protocol;
 import org.traccar.helper.BitUtil;
@@ -27,12 +26,13 @@ import org.traccar.helper.Checksum;
 import org.traccar.helper.DateBuilder;
 import org.traccar.helper.UnitsConverter;
 import org.traccar.model.Position;
+import org.traccar.session.DeviceSession;
 
 import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Date;
 
 public class NavisProtocolDecoder extends BaseProtocolDecoder {
 
@@ -479,7 +479,6 @@ public class NavisProtocolDecoder extends BaseProtocolDecoder {
                     value = buf.readUnsignedByte();
                     position.set("humidity" + (i - 165), value != 0xFF ? value * 0.5 : null);
                 }
-                case 205 -> position.set("diagnostic", buf.readUnsignedIntLE());
                 default -> {
                     if (i >= 206 && i <= 221) {
                         position.set("user1Byte" + (i - 205), buf.readUnsignedByte());

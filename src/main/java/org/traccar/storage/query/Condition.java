@@ -193,18 +193,14 @@ public interface Condition {
     }
 
     class LatestPositions implements Condition {
-        private final long deviceId;
+        private final Condition condition;
 
-        public LatestPositions(long deviceId) {
-            this.deviceId = deviceId;
+        public LatestPositions(Condition condition) {
+            this.condition = condition;
         }
 
-        public LatestPositions() {
-            this(0);
-        }
-
-        public long getDeviceId() {
-            return deviceId;
+        public Condition getCondition() {
+            return condition;
         }
     }
 

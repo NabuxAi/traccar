@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 - 2024 Anton Tananaev (anton@traccar.org)
+ * Copyright 2013 - 2026 Anton Tananaev (anton@traccar.org)
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,15 +17,15 @@ package org.traccar.protocol;
 
 import io.netty.channel.Channel;
 import org.traccar.BaseProtocolDecoder;
-import org.traccar.model.CellTower;
-import org.traccar.model.Network;
-import org.traccar.session.DeviceSession;
 import org.traccar.NetworkMessage;
 import org.traccar.Protocol;
 import org.traccar.helper.Parser;
 import org.traccar.helper.PatternBuilder;
 import org.traccar.helper.UnitsConverter;
+import org.traccar.model.CellTower;
+import org.traccar.model.Network;
 import org.traccar.model.Position;
+import org.traccar.session.DeviceSession;
 
 import java.net.SocketAddress;
 import java.util.Date;
@@ -131,7 +131,7 @@ public class WialonProtocolDecoder extends BaseProtocolDecoder {
         if (parser.hasNext()) {
             String[] values = parser.next().split(",");
             for (int i = 0; i < values.length; i++) {
-                position.set(Position.PREFIX_ADC + (i + 1), values[i]);
+                position.set(Position.PREFIX_ADC + (i + 1), Double.parseDouble(values[i]));
             }
         }
 

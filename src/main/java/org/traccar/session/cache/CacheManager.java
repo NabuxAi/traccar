@@ -15,19 +15,20 @@
  */
 package org.traccar.session.cache;
 
-import jakarta.inject.Inject;
-import jakarta.inject.Singleton;
+import com.google.common.base.Suppliers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.broadcast.BroadcastInterface;
 import org.traccar.broadcast.BroadcastService;
 import org.traccar.config.Config;
 import org.traccar.config.Keys;
+import org.traccar.database.DeviceLookupService;
 import org.traccar.helper.model.AttributeUtil;
 import org.traccar.helper.model.PositionUtil;
 import org.traccar.model.Attribute;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Calendar;
+import org.traccar.model.CompactPosition;
 import org.traccar.model.Device;
 import org.traccar.model.Driver;
 import org.traccar.model.Geofence;
@@ -48,11 +49,16 @@ import org.traccar.storage.query.Columns;
 import org.traccar.storage.query.Condition;
 import org.traccar.storage.query.Request;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.Supplier;
@@ -66,21 +72,33 @@ public class CacheManager implements BroadcastInterface {
     private static final Set<Class<? extends BaseModel>> GROUPED_CLASSES =
             Set.of(Attribute.class, Device.class, Driver.class, Geofence.class, Maintenance.class, Notification.class);
 
+    private static final Set<Class<? extends BaseModel>> LAZY_CLASSES =
+            Set.of(Attribute.class, Driver.class, Maintenance.class, Calendar.class);
+
     private final Config config;
     private final Storage storage;
     private final BroadcastService broadcastService;
+    private final DeviceLookupService deviceLookupService;
 
     private final CacheGraph graph = new CacheGraph();
 
+    private static final class PositionHistory {
+        private volatile Position latest;
+        private final Deque<CompactPosition> positions = new ConcurrentLinkedDeque<>();
+    }
+
     private volatile Server server;
-    private final Map<Long, ConcurrentLinkedDeque<Position>> devicePositions = new ConcurrentHashMap<>();
+    private final Map<Long, Supplier<PositionHistory>> devicePositions = new ConcurrentHashMap<>();
     private final Map<Long, HashSet<Object>> deviceReferences = new ConcurrentHashMap<>();
 
     @Inject
-    public CacheManager(Config config, Storage storage, BroadcastService broadcastService) throws StorageException {
+    public CacheManager(
+            Config config, Storage storage, BroadcastService broadcastService,
+            DeviceLookupService deviceLookupService) throws StorageException {
         this.config = config;
         this.storage = storage;
         this.broadcastService = broadcastService;
+        this.deviceLookupService = deviceLookupService;
         server = storage.getObject(Server.class, new Request(new Columns.All()));
         broadcastService.registerListener(this);
     }
@@ -104,12 +122,13 @@ public class CacheManager implements BroadcastInterface {
     }
 
     public Position getPosition(long deviceId) {
-        var positions = devicePositions.get(deviceId);
-        return positions != null ? positions.peekLast() : null;
+        var history = devicePositions.get(deviceId);
+        return history != null ? history.get().latest : null;
     }
 
-    public Deque<Position> getPositions(long deviceId) {
-        return devicePositions.computeIfAbsent(deviceId, k -> new ConcurrentLinkedDeque<>());
+    public Deque<CompactPosition> getPositions(long deviceId) {
+        var history = devicePositions.get(deviceId);
+        return history != null ? history.get().positions : new ConcurrentLinkedDeque<>();
     }
 
     public Server getServer() {
@@ -132,48 +151,70 @@ public class CacheManager implements BroadcastInterface {
                 .collect(Collectors.toUnmodifiableSet());
     }
 
-    public synchronized void addDevice(long deviceId, Object key) throws Exception {
+    public <T> T withDevice(long deviceId, Callable<T> action) throws Exception {
+        var key = new Object();
+        try {
+            addDevice(deviceId, null, key);
+            return action.call();
+        } finally {
+            removeDevice(deviceId, key);
+        }
+    }
+
+    public synchronized void addDevice(long deviceId, Device device, Object key) throws Exception {
         var references = deviceReferences.computeIfAbsent(deviceId, k -> new HashSet<>());
         if (references.isEmpty()) {
-            Device device = storage.getObject(Device.class, new Request(
-                    new Columns.All(), new Condition.Equals("id", deviceId)));
+            if (device == null) {
+                device = storage.getObject(Device.class, new Request(
+                        new Columns.All(), new Condition.Equals("id", deviceId)));
+            }
             graph.addObject(device);
             initializeCache(device);
-            if (device.getPositionId() > 0) {
-                Position position = storage.getObject(Position.class, new Request(
-                        new Columns.All(),
-                        new Condition.And(
-                                new Condition.Equals("deviceId", deviceId),
-                                new Condition.Equals("id", device.getPositionId()))));
-                if (position != null) {
-                    var positions = devicePositions.computeIfAbsent(deviceId, k -> new ConcurrentLinkedDeque<>());
-                    if (config.getBoolean(Keys.REPORT_TRIP_NEW_LOGIC)) {
-                        long minDuration = AttributeUtil.lookup(this, Keys.REPORT_TRIP_MIN_DURATION, deviceId) * 1000;
-                        var from = new Date(position.getFixTime().getTime() - minDuration);
-                        var to = position.getFixTime();
-                        try (var positionsStream =
-                                PositionUtil.getPositionsStreamWithExtra(storage, deviceId, from, to)) {
-                            positionsStream.forEach(loaded -> {
-                                Position previous = positions.peekLast();
-                                if (previous == null || loaded.getFixTime().after(previous.getFixTime())) {
-                                    positions.add(loaded);
-                                }
-                            });
-                        }
-                    } else {
-                        positions.add(position);
-                    }
-                }
-            }
+            long positionId = device.getPositionId();
+            Long duration = positionId > 0 && config.getBoolean(Keys.REPORT_TRIP_NEW_LOGIC)
+                    ? AttributeUtil.lookup(this, Keys.REPORT_TRIP_MIN_DURATION, deviceId) * 1000L : null;
+            devicePositions.put(deviceId, Suppliers.memoize(() -> loadPositions(deviceId, positionId, duration)));
         }
         references.add(key);
         LOGGER.debug("Cache add device {} references {} key {}", deviceId, references.size(), key);
+    }
+
+    private PositionHistory loadPositions(long deviceId, long positionId, Long duration) {
+        var history = new PositionHistory();
+        if (positionId > 0) {
+            try {
+                long period = config.getLong(Keys.DATABASE_POSITION_PERIOD);
+                Date minTime = period > 0 ? new Date(System.currentTimeMillis() - period * 1000) : null;
+                var conditions = new ArrayList<Condition>();
+                conditions.add(new Condition.Equals("deviceId", deviceId));
+                conditions.add(new Condition.Equals("id", positionId));
+                Position position = storage.getObject(Position.class, new Request(
+                        duration != null ? new Columns.Include("fixTime") : new Columns.All(),
+                        Condition.merge(conditions)));
+                if (position != null) {
+                    if (duration != null) {
+                        var to = position.getFixTime();
+                        var from = new Date(to.getTime() - duration);
+                        try (var stream = PositionUtil.getPositionsStreamWithExtra(
+                                storage, deviceId, from, to, minTime)) {
+                            stream.forEach(loaded -> appendPosition(history, loaded));
+                        }
+                    } else {
+                        appendPosition(history, position);
+                    }
+                }
+            } catch (StorageException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return history;
     }
 
     public synchronized void removeDevice(long deviceId, Object key) {
         var references = deviceReferences.computeIfAbsent(deviceId, k -> new HashSet<>());
         references.remove(key);
         if (references.isEmpty()) {
+            removeLinkedDevices(deviceId);
             graph.removeObject(Device.class, deviceId);
             devicePositions.remove(deviceId);
             deviceReferences.remove(deviceId);
@@ -181,45 +222,81 @@ public class CacheManager implements BroadcastInterface {
         LOGGER.debug("Cache remove device {} references {} key {}", deviceId, references.size(), key);
     }
 
+    private void removeLinkedDevices(long deviceId) {
+        for (Device linkedDevice : getDeviceObjects(deviceId, Device.class)) {
+            removeDevice(linkedDevice.getId(), deviceId);
+        }
+    }
+
+    private static boolean appendPosition(PositionHistory history, Position position) {
+        Position previous = history.latest;
+        if (previous != null) {
+            if (position.getFixTime().before(previous.getFixTime())) {
+                return false;
+            }
+            if (position.getFixTime().equals(previous.getFixTime())) {
+                if (position.getServerTime().before(previous.getServerTime())) {
+                    return false;
+                }
+                history.positions.pollLast();
+            }
+        }
+        history.positions.add(new CompactPosition(position));
+        history.latest = position;
+        return true;
+    }
+
     public void updatePosition(Position position) {
-        deviceReferences.computeIfPresent(position.getDeviceId(), (key, oldValue) -> {
-            var positions = devicePositions.computeIfAbsent(key, k -> new ConcurrentLinkedDeque<>());
-            Position previous = positions.peekLast();
-            if (previous != null && !position.getFixTime().after(previous.getFixTime())) {
-                return oldValue;
+        long deviceId = position.getDeviceId();
+        var loader = devicePositions.get(deviceId);
+        if (loader != null) {
+            var history = loader.get();
+            synchronized (history) {
+                if (!appendPosition(history, position)) {
+                    return;
+                }
+                var positions = history.positions;
+                if (config.getBoolean(Keys.REPORT_TRIP_NEW_LOGIC)) {
+                    long minDuration = AttributeUtil.lookup(
+                            this, Keys.REPORT_TRIP_MIN_DURATION, deviceId) * 1000;
+                    long lastTime = position.getFixTime().getTime();
+                    var iterator = positions.iterator();
+                    iterator.next();
+                    int toPrune = 0;
+                    while (iterator.hasNext() && lastTime - iterator.next().fixTime().getTime() >= minDuration) {
+                        toPrune += 1;
+                    }
+                    while (toPrune-- > 0) {
+                        positions.poll();
+                    }
+                } else {
+                    while (positions.size() > 1) {
+                        positions.poll();
+                    }
+                }
             }
-            positions.add(position);
-            if (config.getBoolean(Keys.REPORT_TRIP_NEW_LOGIC)) {
-                long minDuration = AttributeUtil.lookup(
-                        this, Keys.REPORT_TRIP_MIN_DURATION, key) * 1000;
-                long lastTime = position.getFixTime().getTime();
-                var iterator = positions.iterator();
-                iterator.next();
-                int toPrune = 0;
-                while (iterator.hasNext() && lastTime - iterator.next().getFixTime().getTime() >= minDuration) {
-                    toPrune += 1;
-                }
-                while (toPrune-- > 0) {
-                    positions.poll();
-                }
-            } else {
-                while (positions.size() > 1) {
-                    positions.poll();
-                }
-            }
-            return oldValue;
-        });
+        }
     }
 
     @Override
     public <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {
+        if (clazz.equals(Device.class)) {
+            deviceLookupService.reset();
+        }
         if (local) {
             broadcastService.invalidateObject(true, clazz, id, operation);
         }
 
         synchronized (this) {
             if (operation == ObjectOperation.DELETE) {
+                if (clazz.equals(Device.class)) {
+                    var references = deviceReferences.get(id);
+                    if (references != null && !references.isEmpty()) {
+                        return;
+                    }
+                    removeLinkedDevices(id);
+                }
                 graph.removeObject(clazz, id);
             }
             if (operation != ObjectOperation.UPDATE) {
@@ -236,13 +313,13 @@ public class CacheManager implements BroadcastInterface {
             if (after == null) {
                 return;
             }
-            var before = getObject(after.getClass(), after.getId());
-            if (before == null) {
-                return;
-            }
+            if (after instanceof GroupedModel || after instanceof Schedulable) {
+                var before = getObject(after.getClass(), after.getId());
+                if (before == null) {
+                    return;
+                }
 
-            switch (after) {
-                case GroupedModel afterGrouped -> {
+                if (after instanceof GroupedModel afterGrouped) {
                     long beforeGroupId = ((GroupedModel) before).getGroupId();
                     long afterGroupId = afterGrouped.getGroupId();
                     if (beforeGroupId != afterGroupId) {
@@ -254,7 +331,7 @@ public class CacheManager implements BroadcastInterface {
                         }
                     }
                 }
-                case Schedulable afterSchedulable -> {
+                if (after instanceof Schedulable afterSchedulable) {
                     long beforeCalendarId = ((Schedulable) before).getCalendarId();
                     long afterCalendarId = afterSchedulable.getCalendarId();
                     if (beforeCalendarId != afterCalendarId) {
@@ -266,7 +343,6 @@ public class CacheManager implements BroadcastInterface {
                         }
                     }
                 }
-                default -> {}
             }
 
             graph.updateObject(after);
@@ -308,23 +384,32 @@ public class CacheManager implements BroadcastInterface {
             return;
         }
 
+        boolean cachedDeviceLink = fromClass.equals(Device.class) && toClass.equals(Device.class)
+                && graph.getObject(fromClass, fromId) != null;
         if (link) {
-            if (!graph.addLink(fromClass, fromId, toClass, toId, createObjectSupplier(toClass, toId))) {
-                initializeCache(graph.getObject(toClass, toId));
+            if (cachedDeviceLink) {
+                addDevice(toId, null, fromId);
+            }
+            var loaded = graph.addLink(fromClass, fromId, toClass, toId,
+                    createObjectSupplier(toClass, toId), LAZY_CLASSES.contains(toClass));
+            if (loaded != null) {
+                initializeCache(loaded);
             }
         } else {
             graph.removeLink(fromClass, fromId, toClass, toId);
+            if (cachedDeviceLink) {
+                removeDevice(toId, fromId);
+            }
         }
     }
 
     private void initializeCache(BaseModel object) throws Exception {
         if (object instanceof User) {
-            for (Permission permission : storage.getPermissions(User.class, Notification.class)) {
-                if (permission.getOwnerId() == object.getId()) {
-                    invalidatePermission(
-                            permission.getOwnerClass(), permission.getOwnerId(),
-                            permission.getPropertyClass(), permission.getPropertyId(), true);
-                }
+            for (Permission permission : storage.getPermissions(List.of(
+                    new Permission(User.class, object.getId(), Notification.class, 0)))) {
+                invalidatePermission(
+                        permission.getOwnerClass(), permission.getOwnerId(),
+                        permission.getPropertyClass(), permission.getPropertyId(), true);
             }
         } else {
             if (object instanceof GroupedModel groupedModel) {
@@ -333,23 +418,18 @@ public class CacheManager implements BroadcastInterface {
                     invalidatePermission(object.getClass(), object.getId(), Group.class, groupId, true);
                 }
 
-                for (Permission permission : storage.getPermissions(User.class, object.getClass())) {
-                    if (permission.getPropertyId() == object.getId()) {
-                        invalidatePermission(
-                                object.getClass(), object.getId(), User.class, permission.getOwnerId(), true);
+                var filters = new ArrayList<Permission>();
+                filters.add(new Permission(User.class, 0, object.getClass(), object.getId()));
+                for (var clazz : GROUPED_CLASSES) {
+                    if (!clazz.equals(Device.class)) {
+                        filters.add(new Permission(object.getClass(), object.getId(), clazz, 0));
+                    } else if (object instanceof Device) {
+                        filters.add(new Permission(Device.class, object.getId(), LinkedDevice.class, 0));
                     }
                 }
-
-                for (Class<? extends BaseModel> clazz : GROUPED_CLASSES) {
-                    if (!clazz.equals(Device.class) || object.getClass().equals(Device.class)) {
-                        for (Permission permission : storage.getPermissions(object.getClass(), clazz)) {
-                            if (permission.getOwnerId() == object.getId()) {
-                                invalidatePermission(
-                                        object.getClass(), object.getId(),
-                                        clazz, permission.getPropertyId(), true);
-                            }
-                        }
-                    }
+                for (var permission : storage.getPermissions(filters)) {
+                    invalidatePermission(false, permission.getOwnerClass(), permission.getOwnerId(),
+                            permission.getPropertyClass(), permission.getPropertyId(), true);
                 }
             }
 

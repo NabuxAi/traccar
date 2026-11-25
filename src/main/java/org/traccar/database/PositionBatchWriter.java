@@ -15,8 +15,6 @@
  */
 package org.traccar.database;
 
-import jakarta.inject.Inject;
-import jakarta.inject.Singleton;
 import org.traccar.config.Config;
 import org.traccar.config.Keys;
 import org.traccar.model.Position;
@@ -25,12 +23,13 @@ import org.traccar.storage.StorageException;
 import org.traccar.storage.query.Columns;
 import org.traccar.storage.query.Request;
 
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @Singleton
@@ -51,12 +50,14 @@ public class PositionBatchWriter {
         long interval = config.getLong(Keys.DATABASE_POSITION_BATCH_INTERVAL);
         if (interval > 0) {
             queue = new ConcurrentLinkedQueue<>();
-            ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "PositionBatchWriter");
-                thread.setDaemon(true);
-                return thread;
-            });
-            scheduler.scheduleWithFixedDelay(this::flush, interval, interval, TimeUnit.MILLISECONDS);
+            int threads = config.getInteger(Keys.DATABASE_POSITION_BATCH_THREADS);
+            var scheduler = Executors.newScheduledThreadPool(threads,
+                    Thread.ofPlatform().daemon().name("PositionBatchWriter-", 1).factory());
+            scheduler.scheduleWithFixedDelay(() -> {
+                if (!queue.isEmpty()) {
+                    scheduler.execute(this::flush);
+                }
+            }, interval, interval, TimeUnit.MILLISECONDS);
         } else {
             queue = null;
         }
@@ -78,22 +79,26 @@ public class PositionBatchWriter {
 
     private void flush() {
         List<Entry> batch = new ArrayList<>(batchSize);
-        Entry entry;
-        while (batch.size() < batchSize && (entry = queue.poll()) != null) {
-            batch.add(entry);
-        }
-        if (batch.isEmpty()) {
-            return;
-        }
-        try {
-            List<Position> positions = batch.stream().map(Entry::position).toList();
-            List<Long> ids = storage.addObjects(positions, INSERT_REQUEST);
-            for (int i = 0; i < batch.size(); i++) {
-                batch.get(i).future().complete(ids.get(i));
+        do {
+            batch.clear();
+            Entry entry;
+            while (batch.size() < batchSize && (entry = queue.poll()) != null) {
+                batch.add(entry);
             }
-        } catch (Exception error) {
-            batch.forEach(e -> e.future().completeExceptionally(error));
-        }
+            if (batch.isEmpty()) {
+                return;
+            }
+            try {
+                List<Position> positions = batch.stream().map(Entry::position).toList();
+                List<Long> ids = storage.addObjects(positions, INSERT_REQUEST);
+                for (int i = 0; i < batch.size(); i++) {
+                    batch.get(i).future().complete(ids.get(i));
+                }
+            } catch (Exception error) {
+                batch.forEach(e -> e.future().completeExceptionally(error));
+                return;
+            }
+        } while (batch.size() == batchSize);
     }
 
 }

@@ -16,6 +16,14 @@
  */
 package org.traccar.api.resource;
 
+import org.traccar.api.ExtendedObjectResource;
+import org.traccar.handler.ComputedAttributesProvider;
+import org.traccar.helper.model.PositionUtil;
+import org.traccar.model.Attribute;
+import org.traccar.model.Device;
+import org.traccar.model.Position;
+import org.traccar.session.cache.CacheManager;
+
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -27,18 +35,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-
 import java.util.List;
-
-import org.traccar.api.ExtendedObjectResource;
-import org.traccar.model.Attribute;
-import org.traccar.model.Device;
-import org.traccar.model.Position;
-import org.traccar.handler.ComputedAttributesProvider;
-import org.traccar.session.cache.CacheManager;
-import org.traccar.storage.query.Columns;
-import org.traccar.storage.query.Condition;
-import org.traccar.storage.query.Request;
 
 @Path("attributes/computed")
 @Produces(MediaType.APPLICATION_JSON)
@@ -61,13 +58,9 @@ public class AttributeResource extends ExtendedObjectResource<Attribute> {
         permissionsService.checkAdmin(getUserId());
         permissionsService.checkPermission(Device.class, getUserId(), deviceId);
 
-        Position position = storage.getObject(Position.class, new Request(
-                new Columns.All(),
-                new Condition.LatestPositions(deviceId)));
+        Position position = PositionUtil.getLatestPosition(storage, deviceId);
 
-        var key = new Object();
-        try {
-            cacheManager.addDevice(position.getDeviceId(), key);
+        return cacheManager.withDevice(position.getDeviceId(), () -> {
             Object result = computedAttributesProvider.compute(entity, position);
             if (result != null) {
                 return switch (entity.getType()) {
@@ -77,9 +70,7 @@ public class AttributeResource extends ExtendedObjectResource<Attribute> {
             } else {
                 return Response.noContent().build();
             }
-        } finally {
-            cacheManager.removeDevice(position.getDeviceId(), key);
-        }
+        });
     }
 
     @POST

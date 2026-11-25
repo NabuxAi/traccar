@@ -16,6 +16,8 @@
 package org.traccar.storage;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import org.traccar.config.Config;
 import org.traccar.config.Keys;
 import org.traccar.model.BaseModel;
@@ -29,17 +31,18 @@ import org.traccar.storage.query.Order;
 import org.traccar.storage.query.Request;
 
 import jakarta.inject.Inject;
-import javax.sql.DataSource;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.Collections;
+import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
+import java.util.StringJoiner;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.sql.DataSource;
 
 public class DatabaseStorage extends Storage {
 
@@ -47,6 +50,7 @@ public class DatabaseStorage extends Storage {
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
     private final String databaseType;
+    private final Cache<String, int[]> typeCache = CacheBuilder.newBuilder().maximumSize(1000).build();
 
     @Inject
     public DatabaseStorage(Config config, DataSource dataSource, ObjectMapper objectMapper) {
@@ -81,12 +85,12 @@ public class DatabaseStorage extends Storage {
         query.append(formatOrder(request.getOrder()));
         QueryBuilder builder = null;
         try {
-            builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString());
+            builder = QueryBuilder.create(config, dataSource, objectMapper, typeCache, query.toString(), false);
             List<Object> values = getConditionVariables(request.getCondition());
             for (int index = 0; index < values.size(); index++) {
                 builder.setValue(index, values.get(index));
             }
-            Stream<T> stream = builder.executeQueryStreamed(clazz);
+            Stream<T> stream = builder.executeQueryStreamed(clazz, databaseType);
             builder = null;
             return stream;
         } catch (SQLException e) {
@@ -106,7 +110,7 @@ public class DatabaseStorage extends Storage {
     public <T> long addObject(T entity, Request request) throws StorageException {
         List<String> columns = request.getColumns().getColumns(entity.getClass(), "get");
         try (QueryBuilder builder = QueryBuilder.create(
-                config, dataSource, objectMapper, formatInsert(entity.getClass(), columns), true)) {
+                config, dataSource, objectMapper, typeCache, formatInsert(entity.getClass(), columns), true)) {
             builder.setObject(entity, columns);
             return builder.executeUpdate();
         } catch (SQLException e) {
@@ -119,7 +123,7 @@ public class DatabaseStorage extends Storage {
         Class<?> entityClass = entities.getFirst().getClass();
         List<String> columns = request.getColumns().getColumns(entityClass, "get");
         try (QueryBuilder builder = QueryBuilder.create(
-                config, dataSource, objectMapper, formatInsert(entityClass, columns), true)) {
+                config, dataSource, objectMapper, typeCache, formatInsert(entityClass, columns), true)) {
             for (T entity : entities) {
                 builder.setObject(entity, columns);
                 builder.addBatch();
@@ -149,12 +153,9 @@ public class DatabaseStorage extends Storage {
     @Override
     public <T> void updateObject(T entity, Request request) throws StorageException {
         List<String> columns = request.getColumns().getColumns(entity.getClass(), "get");
-        StringBuilder query = new StringBuilder("UPDATE ");
-        query.append(getStorageName(entity.getClass()));
-        query.append(" SET ");
-        query.append(formatColumns(columns, c -> c + " = ?"));
-        query.append(formatCondition(request.getCondition()));
-        try (QueryBuilder builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString())) {
+        String query = formatUpdate(entity.getClass(), columns) + formatCondition(request.getCondition());
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query, false)) {
             builder.setObject(entity, columns);
             List<Object> values = getConditionVariables(request.getCondition());
             for (int index = 0; index < values.size(); index++) {
@@ -167,11 +168,34 @@ public class DatabaseStorage extends Storage {
     }
 
     @Override
+    public <T extends BaseModel> void updateObjects(List<T> entities, Columns columns) throws StorageException {
+        var clazz = entities.getFirst().getClass();
+        var names = columns.getColumns(clazz, "get");
+        String query = formatUpdate(clazz, names) + " WHERE id = ?";
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query, false)) {
+            for (T entity : entities) {
+                builder.setObject(entity, names);
+                builder.setLong(names.size(), entity.getId());
+                builder.addBatch();
+            }
+            builder.executeUpdateBatch();
+        } catch (SQLException e) {
+            throw new StorageException(e);
+        }
+    }
+
+    private String formatUpdate(Class<?> clazz, List<String> columns) throws StorageException {
+        return "UPDATE " + getStorageName(clazz) + " SET " + formatColumns(columns, column -> column + " = ?");
+    }
+
+    @Override
     public void removeObject(Class<?> clazz, Request request) throws StorageException {
         StringBuilder query = new StringBuilder("DELETE FROM ");
         query.append(getStorageName(clazz));
         query.append(formatCondition(request.getCondition()));
-        try (QueryBuilder builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString())) {
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query.toString(), false)) {
             List<Object> values = getConditionVariables(request.getCondition());
             for (int index = 0; index < values.size(); index++) {
                 builder.setValue(index, values.get(index));
@@ -183,26 +207,29 @@ public class DatabaseStorage extends Storage {
     }
 
     @Override
-    public List<Permission> getPermissions(
-            Class<? extends BaseModel> ownerClass, long ownerId,
-            Class<? extends BaseModel> propertyClass, long propertyId) throws StorageException {
-        StringBuilder query = new StringBuilder("SELECT * FROM ");
-        query.append(Permission.getStorageName(ownerClass, propertyClass));
-        var conditions = new LinkedList<Condition>();
-        if (ownerId > 0) {
-            conditions.add(new Condition.Equals(Permission.getKey(ownerClass), ownerId));
+    public List<Permission> getPermissions(List<Permission> filters) throws StorageException {
+        var query = new StringJoiner(" UNION ALL ");
+        var values = new ArrayList<>();
+        for (int i = 0; i < filters.size(); i++) {
+            var filter = filters.get(i);
+            var conditions = new LinkedList<Condition>();
+            if (filter.getOwnerId() > 0) {
+                conditions.add(new Condition.Equals(Permission.getKey(filter.getOwnerClass()), filter.getOwnerId()));
+            }
+            if (filter.getPropertyId() > 0) {
+                conditions.add(new Condition.Equals(
+                        Permission.getKey(filter.getPropertyClass()), filter.getPropertyId()));
+            }
+            var condition = Condition.merge(conditions);
+            query.add("SELECT " + i + ", p.* FROM " + filter.getStorageName() + " p" + formatCondition(condition));
+            values.addAll(getConditionVariables(condition));
         }
-        if (propertyId > 0) {
-            conditions.add(new Condition.Equals(Permission.getKey(propertyClass), propertyId));
-        }
-        Condition combinedCondition = Condition.merge(conditions);
-        query.append(formatCondition(combinedCondition));
-        try (QueryBuilder builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString())) {
-            List<Object> values = getConditionVariables(combinedCondition);
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query.toString(), false)) {
             for (int index = 0; index < values.size(); index++) {
                 builder.setValue(index, values.get(index));
             }
-            return builder.executePermissionsQuery();
+            return builder.executePermissionsQuery(filters);
         } catch (SQLException e) {
             throw new StorageException(e);
         }
@@ -216,7 +243,8 @@ public class DatabaseStorage extends Storage {
         query.append(" VALUES (");
         query.append(entries.stream().map(e -> "?").collect(Collectors.joining(", ")));
         query.append(")");
-        try (QueryBuilder builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString(), true)) {
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query.toString(), true)) {
             for (int index = 0; index < entries.size(); index++) {
                 builder.setLong(index, entries.get(index).getValue());
             }
@@ -228,15 +256,15 @@ public class DatabaseStorage extends Storage {
 
     @Override
     public void removePermission(Permission permission) throws StorageException {
-        var entries = permission.get().entrySet().stream().toList();
         StringBuilder query = new StringBuilder("DELETE FROM ");
         query.append(permission.getStorageName());
         query.append(" WHERE ");
-        query.append(entries.stream().map(e -> e.getKey() + " = ?").collect(Collectors.joining(" AND ")));
-        try (QueryBuilder builder = QueryBuilder.create(config, dataSource, objectMapper, query.toString(), true)) {
-            for (int index = 0; index < entries.size(); index++) {
-                builder.setLong(index, entries.get(index).getValue());
-            }
+        query.append(Permission.getKey(permission.getOwnerClass())).append(" = ? AND ");
+        query.append(Permission.getKey(permission.getPropertyClass())).append(" = ?");
+        try (QueryBuilder builder = QueryBuilder.create(
+                config, dataSource, objectMapper, typeCache, query.toString(), true)) {
+            builder.setLong(0, permission.getOwnerId());
+            builder.setLong(1, permission.getPropertyId());
             builder.executeUpdate();
         } catch (SQLException e) {
             throw new StorageException(e);
@@ -276,15 +304,11 @@ public class DatabaseStorage extends Storage {
                 }
             }
             case Condition.LatestPositions condition -> {
-                if (condition.getDeviceId() > 0) {
-                    results.add(condition.getDeviceId());
-                    results.add(condition.getDeviceId());
-                } else {
-                    long period = config.getLong(Keys.DATABASE_POSITION_PERIOD);
-                    if (period > 0) {
-                        results.add(new Date(System.currentTimeMillis() - period * 1000));
-                    }
+                long period = config.getLong(Keys.DATABASE_POSITION_PERIOD);
+                if (period > 0) {
+                    results.add(new Date(System.currentTimeMillis() - period * 1000));
                 }
+                results.addAll(getConditionVariables(condition.getCondition()));
             }
             default -> {}
         }
@@ -347,20 +371,14 @@ public class DatabaseStorage extends Storage {
 
             } else if (genericCondition instanceof Condition.LatestPositions condition) {
 
-                if (condition.getDeviceId() > 0) {
-                    result.append("deviceId = ? AND ");
-                } else {
-                    long period = config.getLong(Keys.DATABASE_POSITION_PERIOD);
-                    if (period > 0) {
-                        result.append("fixTime > ? AND ");
-                    }
+                long period = config.getLong(Keys.DATABASE_POSITION_PERIOD);
+                if (period > 0) {
+                    result.append("fixTime > ? AND ");
                 }
                 result.append("id IN (");
                 result.append("SELECT positionId FROM ");
                 result.append(getStorageName(Device.class));
-                if (condition.getDeviceId() > 0) {
-                    result.append(" WHERE id = ?");
-                }
+                result.append(formatCondition(condition.getCondition()));
                 result.append(")");
 
             }
@@ -475,6 +493,7 @@ public class DatabaseStorage extends Storage {
             result.append(conditionKey);
             result.append(" = ?");
 
+            return "SELECT * FROM (" + result + ") AS permissions";
         }
 
         return result.toString();

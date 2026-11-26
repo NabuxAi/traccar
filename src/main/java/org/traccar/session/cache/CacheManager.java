@@ -281,11 +281,12 @@ public class CacheManager implements BroadcastInterface {
     @Override
     public <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {
-        if (clazz.equals(Device.class)) {
-            deviceLookupService.reset();
-        }
         if (local) {
             broadcastService.invalidateObject(true, clazz, id, operation);
+            return;
+        }
+        if (clazz.equals(Device.class)) {
+            deviceLookupService.reset();
         }
 
         synchronized (this) {
@@ -352,10 +353,6 @@ public class CacheManager implements BroadcastInterface {
     @Override
     public <T1 extends BaseModel, T2 extends BaseModel> void invalidatePermission(
             boolean local, Class<T1> clazz1, long id1, Class<T2> clazz2, long id2, boolean link) throws Exception {
-        if (local) {
-            broadcastService.invalidatePermission(true, clazz1, id1, clazz2, id2, link);
-        }
-
         synchronized (this) {
             if (clazz1.equals(User.class) && GroupedModel.class.isAssignableFrom(clazz2)) {
                 invalidatePermission(clazz2, id2, clazz1, id1, link);

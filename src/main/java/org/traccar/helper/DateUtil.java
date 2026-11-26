@@ -28,6 +28,14 @@ public final class DateUtil {
     private static final DateTimeFormatter LOCAL_DATE_TIME = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
+    public static Date min(Date first, Date second) {
+        return getTimeOrMax(first) <= getTimeOrMax(second) ? first : second;
+    }
+
+    public static long getTimeOrMax(Date date) {
+        return date != null ? date.getTime() : Long.MAX_VALUE;
+    }
+
     public static Date correctDay(Date guess) {
         return correctDate(new Date(), guess, Calendar.DAY_OF_MONTH);
     }

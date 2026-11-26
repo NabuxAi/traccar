@@ -20,19 +20,27 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
+import org.eclipse.jetty.websocket.api.StatusCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.traccar.helper.DateUtil;
 import org.traccar.helper.model.PositionUtil;
 import org.traccar.model.Device;
 import org.traccar.model.Event;
 import org.traccar.model.LogRecord;
 import org.traccar.model.Position;
+import org.traccar.model.RevokedToken;
+import org.traccar.model.User;
 import org.traccar.session.ConnectionManager;
 import org.traccar.storage.Storage;
 import org.traccar.storage.StorageException;
+import org.traccar.storage.query.Columns;
+import org.traccar.storage.query.Condition;
+import org.traccar.storage.query.Request;
 
 import java.nio.channels.ClosedChannelException;
 import java.util.Collection;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,15 +58,22 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     private final ConnectionManager connectionManager;
     private final Storage storage;
     private final long userId;
+    private final Long tokenId;
 
+    private volatile long expiration;
+    private volatile boolean invalidated;
     private boolean includeLogs;
     private Session session;
 
-    public AsyncSocket(ObjectMapper objectMapper, ConnectionManager connectionManager, Storage storage, long userId) {
+    public AsyncSocket(
+            ObjectMapper objectMapper, ConnectionManager connectionManager, Storage storage,
+            long userId, Date expiration, Long tokenId) {
         this.objectMapper = objectMapper;
         this.connectionManager = connectionManager;
         this.storage = storage;
         this.userId = userId;
+        this.tokenId = tokenId;
+        this.expiration = DateUtil.getTimeOrMax(expiration);
     }
 
     @Override
@@ -67,8 +82,12 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
         try {
             Map<String, Collection<?>> data = new HashMap<>();
             data.put(KEY_POSITIONS, PositionUtil.getLatestPositions(storage, userId));
-            sendData(data);
             connectionManager.addListener(userId, this);
+            if (tokenId != null && storage.getObject(RevokedToken.class, new Request(
+                    new Columns.All(), new Condition.Equals("id", tokenId))) != null) {
+                invalidate();
+            }
+            sendData(data);
         } catch (StorageException e) {
             throw new RuntimeException(e);
         }
@@ -106,6 +125,29 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     }
 
     @Override
+    public void onUpdateUser(User user) {
+        if (user == null || user.getDisabled()) {
+            invalidate();
+        } else {
+            expiration = Math.min(expiration, DateUtil.getTimeOrMax(user.getExpirationTime()));
+        }
+    }
+
+    @Override
+    public void onRevokeToken(long tokenId) {
+        if (this.tokenId != null && this.tokenId == tokenId) {
+            invalidate();
+        }
+    }
+
+    private void invalidate() {
+        invalidated = true;
+        if (session != null && session.isOpen()) {
+            session.close(StatusCode.POLICY_VIOLATION, null, Callback.NOOP);
+        }
+    }
+
+    @Override
     public void onUpdateDevice(Device device) {
         sendData(Map.of(KEY_DEVICES, List.of(device)));
     }
@@ -129,10 +171,14 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
 
     private void sendData(Map<String, Collection<?>> data) {
         if (session != null && session.isOpen()) {
-            try {
-                session.sendText(objectMapper.writeValueAsString(data), Callback.NOOP);
-            } catch (JsonProcessingException e) {
-                LOGGER.warn("Socket JSON formatting error", e);
+            if (!invalidated && System.currentTimeMillis() < expiration) {
+                try {
+                    session.sendText(objectMapper.writeValueAsString(data), Callback.NOOP);
+                } catch (JsonProcessingException e) {
+                    LOGGER.warn("Socket JSON formatting error", e);
+                }
+            } else {
+                session.close(StatusCode.POLICY_VIOLATION, null, Callback.NOOP);
             }
         }
     }

@@ -17,6 +17,7 @@ package org.traccar.api.resource;
 
 import org.traccar.api.BaseResource;
 import org.traccar.api.signature.TokenManager;
+import org.traccar.api.signature.TokenPurpose;
 import org.traccar.mail.MailManager;
 import org.traccar.model.User;
 import org.traccar.notification.TextTemplateFormatter;
@@ -62,7 +63,8 @@ public class PasswordResource extends BaseResource {
         User user = storage.getObject(User.class, new Request(
                 new Columns.All(), new Condition.Equals("email", email.toLowerCase(Locale.ROOT))));
         if (user != null) {
-            var velocityContext = textTemplateFormatter.prepareContext(permissionsService.getServer(), user);
+            var velocityContext = textTemplateFormatter.prepareContext(
+                    permissionsService.getServer(), user, TokenPurpose.PASSWORD);
             var fullMessage = textTemplateFormatter.formatMessage(velocityContext, "passwordReset", false);
             mailManager.sendMessage(user, true, fullMessage.subject(), fullMessage.body()).get();
         }
@@ -76,7 +78,7 @@ public class PasswordResource extends BaseResource {
             @FormParam("token") String token, @FormParam("password") String password)
             throws StorageException, GeneralSecurityException, IOException {
 
-        long userId = tokenManager.verifyToken(token).getUserId();
+        long userId = tokenManager.verifyToken(token, TokenPurpose.PASSWORD).getUserId();
         User user = storage.getObject(User.class, new Request(
                 new Columns.All(), new Condition.Equals("id", userId)));
         if (user != null) {
